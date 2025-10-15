@@ -5,23 +5,22 @@ import time
 import requests
 from datetime import datetime
 
-BASE_URL = "https://g2ccontabilidade.app.questorpublico.com.br"  
-TOKEN = "2be9472b4669f32f8efe24a4730ca906"                       
+# ===================== CONFIGURAÇÕES =====================
+BASE_URL = "https://g2ccontabilidade.app.questorpublico.com.br"
+TOKEN = "2be9472b4669f32f8efe24a4730ca906"
 DESTINO_BASE = r"C:\Users\RH 05\Desktop\CNDs"
 CNPJS_PATH = "cnpjs.txt"
 REGISTRO_PATH = "baixados.json"
 
-# Pausas (segundos)
-REQUEST_SLEEP = 0.6      
-DOWNLOAD_SLEEP = 1.5     
-BETWEEN_CNPJ_SLEEP = 3   
+REQUEST_SLEEP = 0.6
+DOWNLOAD_SLEEP = 1.5
+BETWEEN_CNPJ_SLEEP = 3
+# =========================================================
 
+
+# ========== Funções auxiliares ==========
 
 def safe_str(value):
-    """
-    Garante que o valor seja uma string segura para uso em nomes de arquivos/pastas
-    e remove caracteres proibidos no Windows: \\ / : * ? " < > |
-    """
     if value is None:
         return "Desconhecido"
     if not isinstance(value, str):
@@ -30,18 +29,25 @@ def safe_str(value):
     value = re.sub(r"\s+", " ", value)
     return re.sub(r'[\\/:*?"<>|]', "_", value)
 
+
 def carregar_cnpjs():
-    """Carrega a lista de CNPJs do arquivo de texto (um por linha)."""
     if not os.path.exists(CNPJS_PATH):
-        print(f"❌ Arquivo {CNPJS_PATH} não encontrado.")
         return []
     with open(CNPJS_PATH, "r", encoding="utf-8") as f:
-        cnpjs = [linha.strip() for linha in f if linha.strip()]
-    print(f"📄 {len(cnpjs)} CNPJ(s) carregado(s) de {CNPJS_PATH}")
-    return cnpjs
+        return [linha.strip() for linha in f if linha.strip()]
+
+
+def salvar_cnpjs(cnpjs):
+    try:
+        with open(CNPJS_PATH, "w", encoding="utf-8") as f:
+            for cnpj in sorted(set(cnpjs)):
+                f.write(cnpj + "\n")
+        print(f"💾 Lista de CNPJs atualizada ({len(cnpjs)} empresas).")
+    except Exception as e:
+        print(f"⚠️ Erro ao salvar {CNPJS_PATH}: {e}")
+
 
 def carregar_registro():
-    """Carrega o registro (dict) de arquivos já baixados. Se não existir, retorna dict vazio."""
     if not os.path.exists(REGISTRO_PATH):
         return {}
     try:
@@ -52,12 +58,11 @@ def carregar_registro():
             if isinstance(data, list):
                 return {item: {} for item in data}
     except Exception as e:
-        print(f"⚠️ Erro ao ler {REGISTRO_PATH}: {e} — iniciando registro vazio.")
+        print(f"⚠️ Erro ao ler {REGISTRO_PATH}: {e}")
     return {}
 
 
 def salvar_registro(registro):
-    """Salva o registro (dict) de arquivos baixados."""
     try:
         with open(REGISTRO_PATH, "w", encoding="utf-8") as f:
             json.dump(registro, f, ensure_ascii=False, indent=4)
@@ -65,11 +70,69 @@ def salvar_registro(registro):
         print(f"⚠️ Não foi possível salvar {REGISTRO_PATH}: {e}")
 
 
+# ========== Nova integração: Buscar Contatos ==========
+
+def atualizar_cnpjs_com_api():
+    """
+    Faz um POST na API buscarcontatos e atualiza o arquivo cnpjs.txt
+    - Adiciona novos CNPJs ativos
+    - Remove CNPJs inativos
+    """
+    endpoint = f"{BASE_URL}/api/v1/{TOKEN}/buscarcontatos"
+
+    print("\n🔄 Atualizando lista de CNPJs a partir da API Questor...")
+
+    try:
+        resp = requests.post(endpoint, timeout=30)
+        if resp.status_code != 200:
+            print(f"❌ Erro {resp.status_code} ao buscar contatos.")
+            return
+
+        dados = resp.json()
+        contatos = dados.get("contatos", [])
+        if not contatos:
+            print("⚠️ Nenhum contato retornado pela API.")
+            return
+
+        # separa ativos e inativos
+        ativos = {
+            c["InscricaoFederal"].strip()
+            for c in contatos
+            if c.get("Tipo") == "Empresa/Cliente"
+            and c.get("Status") == "Ativo"
+            and c.get("InscricaoFederal")
+        }
+        inativos = {
+            c["InscricaoFederal"].strip()
+            for c in contatos
+            if c.get("Tipo") == "Empresa/Cliente"
+            and c.get("Status") == "Inativo"
+            and c.get("InscricaoFederal")
+        }
+
+        cnpjs_atuais = set(carregar_cnpjs())
+
+        novos = ativos - cnpjs_atuais
+        removidos = cnpjs_atuais & inativos
+
+        if novos:
+            print(f"➕ {len(novos)} novos CNPJs adicionados.")
+        if removidos:
+            print(f"➖ {len(removidos)} CNPJs inativos removidos.")
+
+        # atualiza a lista
+        cnpjs_atualizados = (cnpjs_atuais | ativos) - inativos
+        salvar_cnpjs(cnpjs_atualizados)
+
+    except requests.RequestException as e:
+        print(f"⚠️ Erro de conexão com a API: {e}")
+    except Exception as e:
+        print(f"⚠️ Erro inesperado ao atualizar CNPJs: {e}")
+
+
+# ========== Comunicação com API de certidões ==========
+
 def buscar_certidoes(cnpj, mes, ano):
-    """
-    Consulta as certidões disponíveis para um CNPJ, mês e ano.
-    Retorna lista de certificados (cada um é dict) ou lista vazia.
-    """
     endpoint = f"{BASE_URL}/api/v1/{TOKEN}/pegarcertidoesmesanocnpj"
     payload = {
         "Cnpj": [cnpj],
@@ -84,15 +147,12 @@ def buscar_certidoes(cnpj, mes, ano):
             certificados = dados.get("certificates", []) if isinstance(dados, dict) else []
             if certificados:
                 print(f"📌 {cnpj} ({mes:02d}/{ano}) -> {len(certificados)} item(s) encontrados")
-            else:
-            
-                pass
             return certificados
         else:
-            print(f"❌ Erro {resp.status_code} ao buscar certidões de {cnpj} ({mes:02d}/{ano})")
+            print(f"❌ Erro {resp.status_code} ao buscar certidões de {cnpj}")
             return []
     except requests.RequestException as e:
-        print(f"⚠️ Erro de conexão ao buscar certidões de {cnpj} ({mes:02d}/{ano}): {e}")
+        print(f"⚠️ Erro de conexão ao buscar certidões: {e}")
         return []
     except Exception as e:
         print(f"⚠️ Erro inesperado ao buscar certidões de {cnpj}: {e}")
@@ -100,19 +160,12 @@ def buscar_certidoes(cnpj, mes, ano):
 
 
 def baixar_arquivo(file_id, caminho_destino):
-    """
-    Baixa o arquivo pela API usando file_id e salva em caminho_destino.
-    Retorna True se baixou com sucesso, False caso contrário.
-    """
     if not file_id:
-        print("⚠️ file_id inválido - pulando download.")
         return False
-
     endpoint = f"{BASE_URL}/api/v1/{TOKEN}/pegararquivo?fileId={file_id}"
     try:
         resp = requests.post(endpoint, timeout=60)
         if resp.status_code == 200 and resp.content:
-            # salva o conteúdo binário
             with open(caminho_destino, "wb") as f:
                 f.write(resp.content)
             return True
@@ -122,92 +175,62 @@ def baixar_arquivo(file_id, caminho_destino):
     except requests.RequestException as e:
         print(f"⚠️ Erro de rede ao baixar {file_id}: {e}")
         return False
-    except Exception as e:
-        print(f"⚠️ Erro inesperado ao baixar {file_id}: {e}")
-        return False
 
+
+# ========== Função principal ==========
 
 def listar_todas_certidoes():
+    atualizar_cnpjs_com_api()  # <-- integração chamada aqui
     cnpjs = carregar_cnpjs()
     if not cnpjs:
+        print("❌ Nenhum CNPJ disponível após atualização.")
         return
 
-    registro = carregar_registro()  # dict: { fileid: {meta} }
+    registro = carregar_registro()
     novos_baixados = 0
     ja_existentes = 0
 
-    ano_atual = datetime.now().year
-    anos = [ano_atual - 1, ano_atual]
+    anos = [2024, 2025]
     meses = range(1, 13)
 
     for idx, cnpj in enumerate(cnpjs, start=1):
         print(f"\n🔍 [{idx}/{len(cnpjs)}] Iniciando varredura para CNPJ: {cnpj}")
-        encontrou_algum_para_cnpj = False
+        encontrou = False
 
         for ano in anos:
             for mes in meses:
                 certificados = buscar_certidoes(cnpj, mes, ano)
-
-                # pausa entre buscas para não sobrecarregar
                 time.sleep(REQUEST_SLEEP)
-
                 if not certificados:
-                    # opcional: print para meses sem resultado
-                    # print(f"✅ {cnpj} ({mes:02d}/{ano}) -> Nenhuma certidão encontrada")
                     continue
 
-                encontrou_algum_para_cnpj = True
-
+                encontrou = True
                 for cert in certificados:
-                    # valores brutos
-                    file_id_raw = cert.get("Filename") or cert.get("filename") or cert.get("FileName")
-                    # se não tiver id do arquivo, ignoramos (não tem como baixar)
-                    if not file_id_raw:
-                        print("⚠️ Certidão sem Filename (não será baixada).")
+                    file_id = cert.get("Filename") or cert.get("filename") or cert.get("FileName")
+                    if not file_id:
                         continue
 
-                    # sanitiza nomes para pastas e nome do arquivo (mas NÃO altera file_id_raw usado na API)
-                    empresa_raw = cert.get("ClientContactName") or cert.get("ClientContactFederalRegistration") or cnpj
-                    owner_raw = cert.get("CategoryOwnerDescription") or cert.get("CategoryDescription") or "Outros"
+                    empresa_raw = cert.get("ClientContactName") or cnpj
+                    owner_raw = cert.get("CategoryOwnerDescription") or "Outros"
                     category_raw = cert.get("CategoryDescription") or "SemCategoria"
 
                     empresa = safe_str(empresa_raw)
                     owner = safe_str(owner_raw)
                     category = safe_str(category_raw)
-                    file_id = str(file_id_raw).strip()
+                    file_id = str(file_id).strip()
 
-                    # nome do arquivo local (inclui file_id para garantir unicidade)
-                    nome_arquivo = f"{category}_{ano}_{mes:02d}_{file_id}.pdf"
-                    nome_arquivo = safe_str(nome_arquivo)
+                    nome_arquivo = safe_str(f"{category}_{ano}_{mes:02d}_{file_id}.pdf")
 
-                    # se já baixado, pula
                     if file_id in registro:
-                        print(f"⏩ {empresa} | {category} | {file_id} -> já baixado anteriormente.")
                         ja_existentes += 1
                         continue
 
-                    # monta pastas com segurança (componentes já sanitizados)
-                    pasta_empresa = os.path.join(DESTINO_BASE, empresa)
-                    pasta_owner = os.path.join(pasta_empresa, owner)
-                    pasta_categoria = os.path.join(pasta_owner, category)
+                    pasta_final = os.path.join(DESTINO_BASE, empresa, owner, category)
+                    os.makedirs(pasta_final, exist_ok=True)
+                    caminho_final = os.path.join(pasta_final, nome_arquivo)
 
-                    # cria pastas recursivamente (seguro)
-                    try:
-                        os.makedirs(pasta_categoria, exist_ok=True)
-                    except Exception as e:
-                        print(f"⚠️ Não foi possível criar pasta {pasta_categoria}: {e}")
-                        continue
-
-                    caminho_final = os.path.join(pasta_categoria, nome_arquivo)
-
-                    print(f"⬇️ Baixando: {empresa} | {owner} / {category} | fileId: {file_id}")
-                    sucesso = baixar_arquivo(file_id, caminho_final)
-
-                    # pausa entre downloads
-                    time.sleep(DOWNLOAD_SLEEP)
-
-                    if sucesso:
-                        # registra o download (metadata útil)
+                    print(f"⬇️ Baixando: {empresa} | {category} | {file_id}")
+                    if baixar_arquivo(file_id, caminho_final):
                         registro[file_id] = {
                             "cnpj": cnpj,
                             "empresa": empresa,
@@ -220,19 +243,17 @@ def listar_todas_certidoes():
                         novos_baixados += 1
                         print(f"✅ Salvo em: {caminho_final}")
                     else:
-                        print(f"❌ Falha ao baixar fileId {file_id}")
+                        print(f"❌ Falha ao baixar {file_id}")
+                    time.sleep(DOWNLOAD_SLEEP)
 
-        if not encontrou_algum_para_cnpj:
-            print(f"✅ Nenhuma certidão encontrada para o CNPJ {cnpj} em 2024-2025.")
-
-        # pausa entre CNPJs para reduzir risco de bloqueio
+        if not encontrou:
+            print(f"✅ Nenhuma certidão encontrada para {cnpj}.")
         time.sleep(BETWEEN_CNPJ_SLEEP)
 
-    # resumo final
     print("\n--- Resumo ---")
     print(f"Novos arquivos baixados: {novos_baixados}")
-    print(f"Arquivos já existentes (pulados): {ja_existentes}")
-    print(f"Total registros em {REGISTRO_PATH}: {len(registro)}")
+    print(f"Arquivos já existentes: {ja_existentes}")
+    print(f"Total em registro: {len(registro)}")
     print("🏁 Varredura concluída!")
 
 
